@@ -1,0 +1,126 @@
+# Session Backend Runtime Reconfiguration
+
+A small Python engineering demonstrator showing how an application can safely replace its active session-storage manager when runtime configuration changes.
+
+## Problem
+
+A common lifecycle bug occurs when configuration changes from one session backend to another, but the application keeps using the storage object created during startup. The configured backend and the active runtime backend then disagree.
+
+## What this project demonstrates
+
+- A consistent storage interface for memory, Redis, Memcached, and SQLAlchemy-backed SQLite storage (the database adapter in this demo is intentionally SQLite-focused).
+- Validation of backend-specific configuration and connection URL schemes.
+- Correct handling of Redis URLs with non-default hosts, ports, and database numbers, for example `redis://cache.internal:6380/3`.
+- Session-manager recreation when the effective configuration changes.
+- Preservation of session limits, timeout, cleanup interval, and storage-expiration settings when a new configuration is supplied.
+- Build-before-swap behavior: if creating the replacement backend fails, the previous manager remains active.
+- Unit tests for lifecycle behavior, configuration validation, and database storage.
+
+## Design
+
+`SessionService` owns the active `SessionManager`. When `reconfigure()` receives a different immutable `SessionSettings` object, it first constructs the replacement storage and manager. Only after successful construction does it swap the active manager, update the settings, increment the generation, and close the previous manager. An unchanged configuration is a no-op.
+
+This ordering avoids dropping the working manager before the replacement has been created. In a production system, the caller would also need a concurrency strategy around in-flight requests and a deliberate session migration or invalidation policy when changing stores.
+
+## Requirements
+
+- Python 3.10+
+- Docker Desktop (optional; used to run Redis and Memcached locally)
+
+## Setup
+
+### macOS / Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e '.[dev]'
+```
+
+### Windows PowerShell
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+```
+
+## Run tests
+
+```bash
+pytest -v
+```
+
+The unit tests use a fake storage factory for lifecycle checks, so they do not require Redis or Memcached to be running. The SQLAlchemy adapter is tested with a temporary SQLite database.
+
+## Run the demo
+
+```bash
+python demo.py
+```
+
+The demo starts with memory storage and switches the service to a local SQLite database configuration. It prints the active backend and manager generation.
+
+## Start optional backend services
+
+```bash
+docker compose up -d
+```
+
+Example connection URLs:
+
+```text
+redis://localhost:6379/0
+memcached://localhost:11211
+sqlite:///./demo_sessions.db
+```
+
+Redis and Memcached adapters connect when they are instantiated. To validate those integrations, start the services first and instantiate `SessionService` with the corresponding `SessionSettings`.
+
+## Example: reconfigure to Redis
+
+```python
+from session_backend import SessionService, SessionSettings
+
+service = SessionService(SessionSettings(backend="memory"))
+
+redis_settings = SessionSettings(
+    backend="redis",
+    url="redis://localhost:6379/0",
+    max_sessions=500,
+    timeout_seconds=900,
+    cleanup_interval_seconds=120,
+    storage_expiration_seconds=1800,
+)
+
+service.reconfigure(redis_settings)
+print(service.settings.backend)  # redis
+print(service.generation)         # 2
+service.close()
+```
+
+## Important scope and production considerations
+
+This is a focused portfolio demonstrator, not a production session framework. It intentionally does not implement distributed locking, session migration between stores, automatic expiration cleanup for the in-memory adapter, database portability beyond SQLite, or concurrent request coordination during a backend swap. A production rollout should define what happens to existing sessions, coordinate reconfiguration across workers, protect credentials in secret storage, and test backend failover and load behavior.
+
+## Repository structure
+
+```text
+session-backend-runtime-demo/
+├── demo.py
+├── docker-compose.yml
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── session_backend/
+│       ├── __init__.py
+│       ├── config.py
+│       ├── manager.py
+│       └── storage.py
+└── tests/
+    ├── test_config.py
+    ├── test_database_storage.py
+    └── test_reconfiguration.py
+```
